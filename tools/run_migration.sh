@@ -11,6 +11,11 @@
 # Legacy. Other settings: API_URL, PG_CONTAINER, PG_USER, PG_DB, PAUSE.
 set -euo pipefail
 
+# Git Bash on Windows rewrites arguments that look like /unix/paths into C:/Program Files/Git/...,
+# which breaks the script path we give to psql inside the container. This turns that off
+# (does nothing on Linux / macOS).
+export MSYS_NO_PATHCONV=1
+
 API_URL="${API_URL:-http://localhost:5087}"
 PG_CONTAINER="${PG_CONTAINER:-gamiq_postgres}"
 PG_USER="${PG_USER:-dev_user}"
