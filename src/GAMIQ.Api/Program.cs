@@ -1,6 +1,7 @@
 using GAMIQ.Api.Config;
 using GAMIQ.Api.Data;
 using GAMIQ.Api.Data.Mongo;
+using GAMIQ.Api.Jobs;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 
@@ -22,6 +23,7 @@ if (string.IsNullOrWhiteSpace(postgresConnection))
 
 // CP2: the current expand-contract phase, and one EF model per phase (see PhaseModelCacheKeyFactory)
 builder.Services.AddSingleton<MigrationState>();
+builder.Services.AddSingleton<BackfillJob>();
 builder.Services.AddDbContext<AppDbContext>(options => options
     .UseNpgsql(postgresConnection)
     .ReplaceService<IModelCacheKeyFactory, PhaseModelCacheKeyFactory>());
