@@ -304,7 +304,12 @@ orders.
 
 Also done: the traffic generator (`tools/traffic_gen.py`), a verification script for every phase
 (`db/postgres/cp2/verify_*.sql`) and `tools/run_migration.sh`, which runs all five phases in
-order. Still to do: the fallback video.
+order.
+
+**Fallback video** (the whole migration, phase 1 to 5, with the traffic generator running):
+https://drive.google.com/drive/folders/1O59ZmltvAdgc6Gv3BWWPftaBDFI6Zc-B?usp=sharing
+The recording is played at 1.25x so it fits in 3 minutes. The seconds printed by the traffic
+generator are the real time of the run.
 
 The whole migration in one go, on a fresh database with the API in `Legacy`:
 
