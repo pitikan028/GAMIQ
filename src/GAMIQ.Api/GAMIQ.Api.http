@@ -1,0 +1,91 @@
+@host = http://localhost:5087/api/v1
+
+### Create a user -> 201
+POST {{host}}/users
+Content-Type: application/json
+
+{
+  "username": "somchai01",
+  "email": "somchai@example.com",
+  "password": "Passw0rd!"
+}
+
+### Same user again -> 409
+POST {{host}}/users
+Content-Type: application/json
+
+{
+  "username": "somchai01",
+  "email": "somchai@example.com",
+  "password": "Passw0rd!"
+}
+
+### Invalid body -> 400
+POST {{host}}/users
+Content-Type: application/json
+
+{
+  "username": "",
+  "email": "not-an-email",
+  "password": "123"
+}
+
+### Get user -> 200
+GET {{host}}/users/1
+
+### Unknown user -> 404
+GET {{host}}/users/999999
+
+### Catalog page 1 -> 200
+GET {{host}}/products?page=1&pageSize=5
+
+### Catalog filtered by genre -> 200
+GET {{host}}/products?genre=RPG&page=1&pageSize=5
+
+### Create product with dynamic attributes -> 201
+POST {{host}}/products
+Content-Type: application/json
+
+{
+  "name": "Chiang Mai Drift",
+  "description": "Street racing through the old city at night.",
+  "price": 590,
+  "stock": 250,
+  "genres": ["Racing", "Indie"],
+  "platforms": ["Windows", "PlayStation5"],
+  "tags": ["Singleplayer", "Controller Support"],
+  "attributes": {
+    "developer": "CMU Studio",
+    "releaseYear": 2026,
+    "ageRating": "E",
+    "dlc": ["Night Pack", "Rain Pack"],
+    "minSpecs": { "ramGb": 8, "gpu": "GTX 1060" }
+  }
+}
+
+### Get one product (paste an id from the list above) -> 200
+GET {{host}}/products/PASTE_PRODUCT_ID
+
+### Create order (dual-DB) -> 201
+# userId 1 has ~1,300 THB after seeding; paste a real product id
+POST {{host}}/orders
+Content-Type: application/json
+
+{
+  "userId": 1,
+  "items": [
+    { "productId": "PASTE_PRODUCT_ID", "quantity": 1 }
+  ]
+}
+
+### Empty order -> 400
+POST {{host}}/orders
+Content-Type: application/json
+
+{
+  "userId": 1,
+  "items": []
+}
+
+### Get order -> 200
+GET {{host}}/orders/1

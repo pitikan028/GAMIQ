@@ -1,0 +1,17 @@
+## .NET
+bin/
+obj/
+*.user
+
+## IDE
+.vs/
+.vscode/*
+!.vscode/extensions.json
+
+## OS
+Thumbs.db
+.DS_Store
+
+## Environment / secrets
+.env
+*.env.local
