@@ -184,11 +184,26 @@ public class OrdersController : ControllerBase
         }
     }
 
-    private static OrderResponse ToResponse(Order order) => new(
-        order.OrderId,
-        order.UserId,
-        order.TotalAmount,
-        order.Status.ToString(),
-        order.CreatedAt,
-        order.Items.Select(i => new OrderItemResponse(i.ProductId, i.ProductName, i.UnitPrice, i.Quantity)).ToList());
+    // CP2 Phase 4 (switch read): from ReadNew on, the amount in the answer comes from PriceAmount
+    // and the currency from CurrencyCode. TotalAmount is not looked at anymore, so it can be
+    // dropped in phase 5. The JSON field is still called totalAmount, so clients don't notice.
+    private OrderResponse ToResponse(Order order)
+    {
+        var readNew = _db.Phase >= MigrationPhase.ReadNew;
+
+        // No fallback to TotalAmount here on purpose. MigrationGuard only lets the API into
+        // ReadNew after the backfill, so an empty PriceAmount would be a real bug.
+        var amount = readNew
+            ? order.PriceAmount ?? throw new InvalidOperationException($"Order {order.OrderId} has no PriceAmount.")
+            : order.TotalAmount ?? throw new InvalidOperationException($"Order {order.OrderId} has no TotalAmount.");
+
+        return new OrderResponse(
+            order.OrderId,
+            order.UserId,
+            amount,
+            readNew ? order.CurrencyCode : null,
+            order.Status.ToString(),
+            order.CreatedAt,
+            order.Items.Select(i => new OrderItemResponse(i.ProductId, i.ProductName, i.UnitPrice, i.Quantity)).ToList());
+    }
 }

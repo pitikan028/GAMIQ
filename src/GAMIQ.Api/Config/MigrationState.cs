@@ -12,7 +12,8 @@ public enum MigrationPhase
 
 // Holds the phase the API is in right now. It starts from Migration:Phase in appsettings.json and
 // can be changed while the API is running (PUT /api/v1/migration/phase), so we never have to
-// restart the API in the middle of the migration.
+// restart the API in the middle of the migration. MigrationGuard checks the database is ready
+// before a switch.
 public class MigrationState
 {
     private readonly ILogger<MigrationState> _logger;

@@ -120,3 +120,23 @@ Content-Type: application/json
 
 ### CP2: backfill progress -> 200
 GET {{host}}/migration/backfill
+
+### CP2: switch read to the new columns (backfill must be Completed) -> 200, or 409 if an order is not migrated
+PUT {{host}}/migration/phase
+Content-Type: application/json
+
+{
+  "phase": "ReadNew"
+}
+
+### CP2: after ReadNew the order has currencyCode -> 200
+GET {{host}}/orders/1
+
+### CP2: stop using TotalAmount (run db/postgres/cp2/02_contract_prepare.sql first) -> 200, or 409
+# then run db/postgres/cp2/03_contract.sql to drop the column
+PUT {{host}}/migration/phase
+Content-Type: application/json
+
+{
+  "phase": "Contract"
+}

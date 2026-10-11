@@ -7,7 +7,7 @@ wallet in THB, they can browse games and buy them. We used ASP.NET Core 8 Web AP
 PostgreSQL (EF Core) and MongoDB.
 
 Checkpoint 1 (the API and both databases) is the first part of this README. Checkpoint 2 (the
-zero-downtime schema migration) starts at [CP2: Zero-downtime schema migration](#cp2-zero-downtime-schema-migration-in-progress).
+zero-downtime schema migration) starts at [CP2: Zero-downtime schema migration](#cp2-zero-downtime-schema-migration).
 
 ## Team
 
@@ -287,7 +287,7 @@ in `.gitignore`, so only `.env.example` is in git. `Config/DotEnv.cs` loads the 
 starts. If you forget to create `.env`, the app stops right away and tells you to copy
 `.env.example`.
 
-## CP2: Zero-downtime schema migration (in progress)
+## CP2: Zero-downtime schema migration
 
 **Scenario.** `Orders.TotalAmount` is one number and the currency is not stored anywhere, we just
 assumed THB. To sell in other currencies later we replace it with two columns,
@@ -299,12 +299,22 @@ orders.
 | 1 | Expand | `db/postgres/cp2/01_expand.sql` adds the two new columns next to `TotalAmount` | done |
 | 2 | Dual write | `POST /orders` writes `TotalAmount` and `PriceAmount` + `CurrencyCode` | done |
 | 3 | Backfill | `Jobs/BackfillJob.cs` copies `TotalAmount` into the new columns for old orders, in batches with a checkpoint | done |
-| 4 | Switch read | `GET /orders/{id}` reads the new columns | to do |
-| 5 | Contract | drop `TotalAmount` | to do |
+| 4 | Switch read | `GET /orders/{id}` answers from `PriceAmount` + `CurrencyCode` | done |
+| 5 | Contract | `02_contract_prepare.sql`, switch the API to `Contract`, `03_contract.sql` drops `TotalAmount` | done |
 
-The traffic generator (`tools/traffic_gen.py`) and the before/after backfill verification queries
-(`db/postgres/cp2/verify_backfill.sql`) are done too. Still to do: phase 4, phase 5 and the
-fallback video.
+Also done: the traffic generator (`tools/traffic_gen.py`), a verification script for every phase
+(`db/postgres/cp2/verify_*.sql`) and `tools/run_migration.sh`, which runs all five phases in
+order. Still to do: the fallback video.
+
+The whole migration in one go, on a fresh database with the API in `Legacy`:
+
+```bash
+docker exec gamiq_postgres psql -U dev_user -d main_db -f /docker-entrypoint-initdb.d/cp2/demo_topup_wallets.sql
+python3 tools/traffic_gen.py --seconds 0     # terminal 2, leave it running
+./tools/run_migration.sh                     # terminal 3, press Enter for every step
+```
+
+Every step of that script is explained below.
 
 ### How the API changes phase without a restart
 
@@ -319,6 +329,22 @@ curl http://localhost:5087/api/v1/migration/phase
 
 The phases are `Legacy`, `DualWrite`, `ReadNew`, `Contract`.
 
+Switching too early would not fail at the switch, it would fail on the next order with a 5xx. So
+the `PUT` first asks `Data/MigrationGuard.cs` if the database is ready, and answers `409` with
+the missing step if it is not:
+
+| Switch to | The database must have |
+|---|---|
+| `DualWrite` | the new columns (`01_expand.sql`) |
+| `ReadNew` | no order with an empty `PriceAmount` / `CurrencyCode` (backfill finished) |
+| `Contract` | the same, and `TotalAmount` nullable (`02_contract_prepare.sql`) |
+| anything else, after the drop | not possible, `TotalAmount` is gone |
+
+The phase lives in the memory of the API process and starts from `appsettings.json` again after a
+restart. The one case where that would break things is a restart after `TotalAmount` was dropped
+(`Legacy` would ask for a column that is gone), so at startup the API looks at the table and
+starts in `Contract` by itself when the column does not exist anymore.
+
 EF Core puts every mapped column in its SELECT and INSERT, so it would crash on a column that
 isn't there yet (before expand) or is already gone (after contract). `AppDbContext` therefore maps
 `Orders` differently per phase, and `PhaseModelCacheKeyFactory` makes EF keep one model per phase:
@@ -326,7 +352,8 @@ isn't there yet (before expand) or is already gone (after contract). `AppDbConte
 | Phase | `TotalAmount` | `PriceAmount`, `CurrencyCode` |
 |---|---|---|
 | Legacy | mapped | ignored |
-| DualWrite, ReadNew | mapped | mapped |
+| DualWrite | mapped | mapped |
+| ReadNew | mapped, may be `NULL` when loaded | mapped |
 | Contract | ignored | mapped |
 
 ### Running phase 1 and 2
@@ -384,6 +411,9 @@ all three CP2 criteria hold:
 | 0 HTTP 5xx | counts 5xx answers and requests that got no answer at all |
 | 0 data corruption / missing field | every `200` / `201` body must have all order fields, and `totalAmount` must equal the sum of its items |
 | p99 below 500 ms | p99 over all requests |
+
+From phase 4 on the answers also have `currencyCode`. If the field is there it must be a 3 letter
+code, and the summary says how many answers had it (= were read from the new columns).
 
 `409` (two orders on the same wallet at the same moment) and `422` (out of stock or money) are
 normal answers, they are counted but they are not errors. Other options: `--url`, `--users`,
@@ -457,21 +487,139 @@ expand script, the switch to dual write and the backfill all done during those 6
 
 Starting the backfill a second time changed 0 rows.
 
-### Notes for phase 4 and 5
+### Running phase 4 (switch read)
 
-- **Switch read:** in `OrdersController.ToResponse`, use `PriceAmount` when the phase is `ReadNew` or later.
-  Right now the response still reads `TotalAmount` in every phase.
-- **Contract:** `TotalAmount` is `NOT NULL`, and in `Contract` the API stops sending it. So the order
-  is: `ALTER COLUMN "TotalAmount" DROP NOT NULL`, switch the API to `Contract`, then `DROP COLUMN`.
-  `DbInitializer` still seeds `TotalAmount` only and needs the new columns too.
-- **Traffic generator:** it checks `totalAmount` in the order response against the items. If
-  phase 4 changes the response (for example adds `currencyCode`), keep `totalAmount` or update
-  `check_order` in `tools/traffic_gen.py`.
-- **Checkpoint table:** the backfill made a small `MigrationCheckpoints` table. It can be dropped together
-  with `TotalAmount`.
-- The new columns are still nullable. If we want `NOT NULL` on them it should be done the safe way
-  (add `CHECK (... IS NOT NULL) NOT VALID`, `VALIDATE`, then `SET NOT NULL`), after the backfill.
-- The phase lives in memory of one API process. It goes back to `appsettings.json` on restart.
+`OrdersController.ToResponse` builds the answer for `GET /orders/{id}` (and for the `201` of
+`POST /orders`). Up to `DualWrite` it uses `TotalAmount`. From `ReadNew` on it uses `PriceAmount`
+and `CurrencyCode` and does not look at `TotalAmount` anymore. With traffic running:
+
+```bash
+# before: every order must be readable from the new columns (ready_to_switch_read = t)
+docker exec gamiq_postgres psql -U dev_user -d main_db -f /docker-entrypoint-initdb.d/cp2/verify_switch_read.sql
+curl http://localhost:5087/api/v1/orders/1
+
+# Phase 4 - switch read
+curl -X PUT http://localhost:5087/api/v1/migration/phase -H "Content-Type: application/json" -d '{"phase":"ReadNew"}'
+
+# after: same totalAmount, and currencyCode is new
+curl http://localhost:5087/api/v1/orders/1
+```
+
+Why this doesn't break anything:
+
+- The JSON field is still called `totalAmount`, only where the value comes from changes. Clients
+  that were written for CP1 keep working.
+- `currencyCode` is added to the answer, and only from `ReadNew` on. Before that the field is left
+  out completely (not `null`), so the answer is byte for byte what it was in CP1. That also makes
+  the switch easy to see in the demo.
+- The switch is refused with `409` while any order still has an empty `PriceAmount`, so a read can
+  never hit an order that was not backfilled. There is no fallback to `TotalAmount` in the code on
+  purpose: a silent fallback would hide a broken backfill until the column is dropped.
+- A request uses one phase from start to end (`AppDbContext` reads it once), so a request that is
+  running during the switch can't mix the old and the new read path.
+- The API still writes both columns in `ReadNew`, so going back to `DualWrite` is one `PUT`.
+
+In `ReadNew` the SQL that EF sends still has `TotalAmount` in its column list, because the column
+is still mapped for the dual write. The value is not used. It leaves the SQL in `Contract`.
+
+### Running phase 5 (contract)
+
+`TotalAmount` is `NOT NULL`, so the column can't just be dropped: the API still sends it. And the
+API can't just stop sending it: the insert would fail. So contract is three small steps, each one
+safe for the API that is running at that moment. With traffic running:
+
+```bash
+# before
+docker exec gamiq_postgres psql -U dev_user -d main_db -f /docker-entrypoint-initdb.d/cp2/verify_contract.sql
+
+# 1. TotalAmount becomes nullable (the API is in ReadNew and still writes it)
+docker exec gamiq_postgres psql -U dev_user -d main_db -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/cp2/02_contract_prepare.sql
+
+# 2. the API stops reading and writing TotalAmount
+curl -X PUT http://localhost:5087/api/v1/migration/phase -H "Content-Type: application/json" -d '{"phase":"Contract"}'
+
+# 3. drop TotalAmount. This is the only step that can't be undone.
+docker exec gamiq_postgres psql -U dev_user -d main_db -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/cp2/03_contract.sql
+
+# after
+docker exec gamiq_postgres psql -U dev_user -d main_db -f /docker-entrypoint-initdb.d/cp2/verify_contract.sql
+```
+
+Why this doesn't lock the table or break anything:
+
+- `DROP NOT NULL` and `DROP COLUMN` only change the catalog. Postgres marks the column as dropped
+  and does not rewrite the table, so the `ACCESS EXCLUSIVE` lock is held for a few milliseconds.
+- Both scripts set `lock_timeout = 2s`, like the expand script. If something holds the table they
+  fail fast and can be run again. Both are safe to run more than once.
+- In `Contract` the EF model ignores `TotalAmount`, so it is in no `SELECT` or `INSERT` when the
+  column disappears. `PUT ... Contract` is refused with `409` until step 1 has run.
+- `03_contract.sql` checks one last time that no order has an empty `PriceAmount` and that no
+  `PriceAmount` is different from `TotalAmount`. If one is, it stops before the drop.
+- After the drop it makes `PriceAmount` and `CurrencyCode` `NOT NULL`, like `TotalAmount` was. A
+  plain `SET NOT NULL` scans the table under `ACCESS EXCLUSIVE`, so it goes the safe way: `CHECK
+  (... IS NOT NULL) NOT VALID`, then `VALIDATE CONSTRAINT` (reads and writes keep going), then
+  `SET NOT NULL` (Postgres 12+ sees the validated check and skips the scan), then drop the check.
+- It also drops `MigrationCheckpoints`, the backfill is finished for good. The backfill endpoint
+  answers `409` in `Contract`.
+
+What `verify_contract.sql` shows before and after:
+
+| Check | Before | After |
+|---|---|---|
+| `TotalAmount` column | there | gone |
+| `PriceAmount`, `CurrencyCode` nullable | `YES` | `NO` |
+| `CK_Orders_TotalAmount` | there | gone (dropped with the column) |
+| `without_price` | 0 | 0 |
+| `wrong_price` (order price against the sum of its `OrderItems`) | 0 | 0 |
+| `MigrationCheckpoints` table | `t` | `f` |
+
+`wrong_price` is the check that still works when `TotalAmount` is gone: `OrderItems` keeps the unit
+price the customer paid, so the order price can be recalculated from a second source.
+
+**Rolling back.** Until step 3 everything can be undone while traffic keeps running. From
+`Contract`: switch back to `ReadNew` (always allowed, the API writes `TotalAmount` again), then run
+`db/postgres/cp2/rollback_contract.sql`. It fills `TotalAmount` for the orders that were made in
+`Contract` and puts `NOT NULL` back. Before that script, `DualWrite` and `Legacy` are refused with
+`409`, because they answer with `TotalAmount` and those orders don't have one. After step 3 there
+is no way back without a backup.
+
+### Test results for all five phases
+
+One run on a fresh database: 20 requests/second for 75 seconds, and `AUTO=1 ./tools/run_migration.sh`
+doing phase 1 to 5 during those 75 seconds.
+
+- 1,500 requests: 750 `201`, 750 `200`, no 4xx, no 5xx, none failed, no bad data
+- p99 over all requests was 26 ms (29 ms for `POST /orders`, 8 ms for `GET /orders/{id}`), max 103 ms
+- 887 of the 1,500 answers had `currencyCode`, so they were read from the new columns (everything
+  after the switch to `ReadNew`)
+- the backfill moved 621 rows in 7 batches (500 seeded + 121 made while the API was in `Legacy`)
+- before the drop: 838 orders, `new_sum` = `legacy_sum` = 1,344,997.00, `wrong_price` 0
+- after the drop: 982 orders, 0 without price, `price_sum` = `items_sum` = 1,456,727.00, `wrong_price` 0
+
+Other things we tested:
+
+- The rollback, also under 20 requests/second: `Contract`, back to `ReadNew`,
+  `rollback_contract.sql`, back to `DualWrite` and `Legacy`. 800 requests, no 5xx, and `TotalAmount`
+  was `NOT NULL` again.
+- Every switch that is too early is refused with `409`: `DualWrite` before expand, `ReadNew`
+  before the backfill, `Contract` before `02_contract_prepare.sql`, and any other phase after the drop.
+- `02_contract_prepare.sql` before the backfill stops with `541 orders have no PriceAmount`.
+- Running `03_contract.sql` a second time changes nothing.
+- Restarting the API after the drop: the log says `starting in Contract instead of Legacy` and
+  orders keep working.
+
+### Known limitations
+
+- The phase lives in the memory of one API process. With several API instances every instance
+  would need the `PUT`, a real setup would keep the phase in a shared place (a feature flag
+  service or a table).
+- The final schema only exists in `db/postgres/cp2/`, the EF migration in `Migrations/` still
+  creates the CP1 table. That is on purpose: a fresh database starts in the legacy shape so the
+  migration can be shown again from the start. The next step after CP2 would be an EF migration
+  with the new columns and removing the phase switch from the code.
+- A request that started before a phase switch finishes in the old phase. That is fine between
+  the steps we run by hand (they are seconds apart), but `03_contract.sql` should not be started
+  in the same second as the switch to `Contract`.
 
 ## Folder structure
 
@@ -483,11 +631,12 @@ Starting the backfill a second time changed 0 rows.
 ├── db/postgres/cp2/     CP2 migration + verification scripts (run by hand)
 ├── GAMIQ.slnx
 ├── tools/traffic_gen.py CP2 traffic generator
+├── tools/run_migration.sh  CP2: runs all five phases in order
 └── src/GAMIQ.Api
     ├── Program.cs
     ├── Config/          .env loader
     ├── Controllers/     Users, Products, Orders
-    ├── Data/            AppDbContext, DbInitializer, Mongo/ (MongoContext, MongoSeeder)
+    ├── Data/            AppDbContext, DbInitializer, MigrationGuard, Mongo/ (MongoContext, MongoSeeder)
     ├── Dtos/
     ├── Helpers/         converts JSON attributes so Mongo can save them
     ├── Jobs/            CP2 BackfillJob

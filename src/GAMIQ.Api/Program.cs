@@ -23,6 +23,7 @@ if (string.IsNullOrWhiteSpace(postgresConnection))
 
 // CP2: the current expand-contract phase, and one EF model per phase (see PhaseModelCacheKeyFactory)
 builder.Services.AddSingleton<MigrationState>();
+builder.Services.AddSingleton<MigrationGuard>();
 builder.Services.AddSingleton<BackfillJob>();
 builder.Services.AddDbContext<AppDbContext>(options => options
     .UseNpgsql(postgresConnection)
@@ -43,6 +44,9 @@ using (var scope = app.Services.CreateScope())
     var products = await MongoSeeder.SeedAsync(mongo);
     await DbInitializer.SeedAsync(db, products);
 }
+
+// CP2: after the contract phase the legacy column is gone, so don't start in Legacy again
+await app.Services.GetRequiredService<MigrationGuard>().SyncPhaseWithSchemaAsync();
 
 if (app.Environment.IsDevelopment())
 {

@@ -80,10 +80,17 @@ public static class DbInitializer
                 })
                 .ToList();
 
+            var total = items.Sum(it => it.UnitPrice * it.Quantity);
+
+            // CP2: both the old and the new fields are set. EF only writes the ones that are
+            // mapped in the current phase, so in Legacy these are still "old" orders with empty
+            // new columns (the data for the backfill).
             orders.Add(new Order
             {
                 UserId = user.UserId,
-                TotalAmount = items.Sum(it => it.UnitPrice * it.Quantity),
+                TotalAmount = total,
+                PriceAmount = total,
+                CurrencyCode = "THB",
                 Status = f.Random.WeightedRandom(
                     new[] { OrderStatus.Completed, OrderStatus.Cancelled, OrderStatus.Failed },
                     new[] { 0.88f, 0.08f, 0.04f }),

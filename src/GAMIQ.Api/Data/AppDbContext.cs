@@ -59,7 +59,12 @@ public class AppDbContext : DbContext
             }
             else
             {
-                entity.Property(o => o.TotalAmount).HasColumnType("decimal(18,2)");
+                // Required only while the API still answers with it. From ReadNew on, a row
+                // can have NULL here (order made in Contract, then rolled back to ReadNew) and
+                // EF must be able to load it.
+                entity.Property(o => o.TotalAmount)
+                      .HasColumnType("decimal(18,2)")
+                      .IsRequired(Phase < MigrationPhase.ReadNew);
                 entity.ToTable(t => t.HasCheckConstraint("CK_Orders_TotalAmount", "\"TotalAmount\" >= 0"));
             }
 
