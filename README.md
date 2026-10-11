@@ -1,20 +1,23 @@
 # GAMIQ - Game Marketplace API
 
-269340 Data Centric Application Development (2026) - Team Project Checkpoint 1
+269340 Data Centric Application Development (2026) - Team Project Checkpoint 1 + 2
 
 GAMIQ is our backend for a small online game store (kind of like a mini Steam). Users have a
 wallet in THB, they can browse games and buy them. We used ASP.NET Core 8 Web API with
 PostgreSQL (EF Core) and MongoDB.
 
+Checkpoint 1 (the API and both databases) is the first part of this README. Checkpoint 2 (the
+zero-downtime schema migration) starts at [CP2: Zero-downtime schema migration](#cp2-zero-downtime-schema-migration-in-progress).
+
 ## Team
 
-| Student ID | Name | Main part |
-|---|---|---|
-| 670615021 | Yanisa Khankhumnanta | PostgreSQL |
-| 670615023 | Natthawan Saengsrichan | Docker + MongoDB |
-| 670615028 | Pitikan Kanjanasiri | API endpoints |
+| Student ID | Name | CP1 part | CP2 part |
+|---|---|---|---|
+| 670615021 | Yanisa Khankhumnanta | PostgreSQL | Phase 3 backfill job, backfill verification queries, traffic generator |
+| 670615023 | Natthawan Saengsrichan | Docker + MongoDB | Phase 4 switch read, phase 5 contract, fallback video |
+| 670615028 | Pitikan Kanjanasiri | API endpoints | Migration phase switch, phase 1 expand, phase 2 dual write |
 
-### Who did what
+### Who did what (CP1)
 
 **Natthawan** set up the repo and `docker-compose.yml` (Postgres + Mongo with volumes and
 healthchecks), `.env.example`, `.gitignore` and the empty .NET project. Natthawan also did the MongoDB
@@ -295,11 +298,12 @@ orders.
 |---|---|---|---|
 | 1 | Expand | `db/postgres/cp2/01_expand.sql` adds the two new columns next to `TotalAmount` | done |
 | 2 | Dual write | `POST /orders` writes `TotalAmount` and `PriceAmount` + `CurrencyCode` | done |
-| 3 | Backfill | copy `TotalAmount` into the new columns for old orders, in batches | to do |
+| 3 | Backfill | `Jobs/BackfillJob.cs` copies `TotalAmount` into the new columns for old orders, in batches with a checkpoint | done |
 | 4 | Switch read | `GET /orders/{id}` reads the new columns | to do |
 | 5 | Contract | drop `TotalAmount` | to do |
 
-Also still to do: the traffic generator, the before/after backfill verification queries and the
+The traffic generator (`tools/traffic_gen.py`) and the before/after backfill verification queries
+(`db/postgres/cp2/verify_backfill.sql`) are done too. Still to do: phase 4, phase 5 and the
 fallback video.
 
 ### How the API changes phase without a restart
@@ -357,19 +361,116 @@ We tested phase 1 and 2 with about 34 requests/second (half `POST /orders`, half
 running during the expand script and the switch to dual write: 1,023 requests, no 5xx, p99 164 ms.
 After that `verify_dual_write.sql` showed 0 mismatched rows.
 
-### Notes for phase 3 to 5
+### Traffic generator
 
-- **Backfill:** only touch rows `WHERE "PriceAmount" IS NULL`, walk the table by `OrderId` in small
-  batches with one short transaction each, and set `CurrencyCode = 'THB'`. Start it only after the
-  API is in `DualWrite`. After it finishes: `ALTER TABLE "Orders" VALIDATE CONSTRAINT "CK_Orders_PriceAmount";`
+`tools/traffic_gen.py` keeps sending requests at a fixed rate, half `POST /orders` and half
+`GET /orders/{id}` (old seeded orders and orders it just created). We start it first and then run
+each migration step while it is going. It only needs Python 3.9 or newer, no `pip install`.
+
+```bash
+# once, before the first run: seeded wallets only have 0 - 5,000 THB and would run out
+docker exec gamiq_postgres psql -U dev_user -d main_db -f /docker-entrypoint-initdb.d/cp2/demo_topup_wallets.sql
+
+# from the repo root, in a second terminal
+python3 tools/traffic_gen.py --rps 20 --seconds 60
+python3 tools/traffic_gen.py --seconds 0        # keep going until Ctrl+C
+```
+
+It prints one line per second and a summary at the end. The run passes (exit code 0) only when
+all three CP2 criteria hold:
+
+| Criteria | How the script checks it |
+|---|---|
+| 0 HTTP 5xx | counts 5xx answers and requests that got no answer at all |
+| 0 data corruption / missing field | every `200` / `201` body must have all order fields, and `totalAmount` must equal the sum of its items |
+| p99 below 500 ms | p99 over all requests |
+
+`409` (two orders on the same wallet at the same moment) and `422` (out of stock or money) are
+normal answers, they are counted but they are not errors. Other options: `--url`, `--users`,
+`--seed-orders`.
+
+We checked that it notices bad data: after changing `TotalAmount` of one order by hand, the reads
+of that order were reported as `BAD DATA` and the run failed.
+
+### Running phase 3 (backfill)
+
+The backfill is `src/GAMIQ.Api/Jobs/BackfillJob.cs`. It runs in the background inside the API and
+is started with one request. The API has to be in `DualWrite` already, otherwise new orders keep
+coming in with empty new columns and the backfill never catches up (the endpoint answers `409` in
+`Legacy`). With traffic running:
+
+```bash
+# before
+docker exec gamiq_postgres psql -U dev_user -d main_db -f /docker-entrypoint-initdb.d/cp2/verify_backfill.sql
+
+# Phase 3 - backfill (returns 202 right away, body is optional)
+curl -X POST http://localhost:5087/api/v1/migration/backfill -H "Content-Type: application/json" -d '{"batchSize":100,"delayMs":50}'
+
+# progress, repeat until "state" is "Completed"
+curl http://localhost:5087/api/v1/migration/backfill
+
+# after
+docker exec gamiq_postgres psql -U dev_user -d main_db -f /docker-entrypoint-initdb.d/cp2/verify_backfill.sql
+```
+
+Why this doesn't lock the table or break anything:
+
+- **Batching.** It never runs one big `UPDATE`. Each batch (100 rows by default) is its own short
+  transaction, then it pauses (50 ms by default) so the API's own queries get through.
+- **Cursor pagination.** Each batch takes the next rows with
+  `WHERE "OrderId" > last id AND "PriceAmount" IS NULL ORDER BY "OrderId" LIMIT n`. That is a
+  short range scan on the primary key, so it does not get slower further into the table like
+  `OFFSET` would.
+- **Checkpointing.** The last `OrderId` is saved in the `MigrationCheckpoints` table in the same
+  transaction as the batch. If the API stops half way, the next `POST` continues from there. We
+  tested it: stopped the API after 150 of 500 rows, started it again, and the log said
+  `Backfill started after OrderId 150`.
+- It only changes rows where `PriceAmount IS NULL`, so it can't overwrite an order the API has
+  already dual-written, and running it again is harmless.
+- `lock_timeout = 2s`: if a row is locked by something else it fails fast (`state: Failed`). The
+  finished batches stay committed.
+- When a pass ends it counts the rows that are still empty. If an order from a `Legacy` request
+  slipped in behind the cursor, it does another pass from the start.
+- Old orders get `CurrencyCode = 'THB'`, because that was the only currency before.
+- At the end it validates `CK_Orders_PriceAmount` (added `NOT VALID` in phase 1). `VALIDATE
+  CONSTRAINT` does not block reads or writes.
+
+What `verify_backfill.sql` shows before and after:
+
+| Check | Before | After |
+|---|---|---|
+| `not_migrated` | number of old orders | 0 |
+| `mismatched`, `half_written`, `bad_currency` | 0 | 0 |
+| `missing_amount` (`sum(TotalAmount) - sum(PriceAmount)`) | money in the old orders | 0.00 |
+| `CK_Orders_PriceAmount` validated | `f` | `t` |
+
+We tested phase 1 to 3 in one run on a fresh database: 20 requests/second for 60 seconds, with the
+expand script, the switch to dual write and the backfill all done during those 60 seconds.
+
+- 1,200 requests: 600 `201`, 600 `200`, no 4xx, no 5xx, none failed, no bad data
+- p99 over all requests was 70 ms (119 ms for `POST /orders`, 25 ms for `GET /orders/{id}`)
+- before the backfill: 735 orders, 654 not migrated (500 seeded + 154 made while the API was still
+  in `Legacy`), `missing_amount` 1,192,565.00
+- the backfill moved 654 rows in 7 batches
+- after: 788 orders, 0 not migrated, 0 mismatched, `legacy_sum` = `new_sum` = 1,289,056.00,
+  constraint validated
+
+Starting the backfill a second time changed 0 rows.
+
+### Notes for phase 4 and 5
+
 - **Switch read:** in `OrdersController.ToResponse`, use `PriceAmount` when the phase is `ReadNew` or later.
   Right now the response still reads `TotalAmount` in every phase.
 - **Contract:** `TotalAmount` is `NOT NULL`, and in `Contract` the API stops sending it. So the order
   is: `ALTER COLUMN "TotalAmount" DROP NOT NULL`, switch the API to `Contract`, then `DROP COLUMN`.
   `DbInitializer` still seeds `TotalAmount` only and needs the new columns too.
-- **Traffic generator:** new users have 0 THB and seeded wallets run out quickly at 20 requests/second, which
-  gives 422 instead of 201. Top the wallets up before the demo. Two orders for the same user at the
-  same moment give 409 (wallet row version), which is expected and not an error.
+- **Traffic generator:** it checks `totalAmount` in the order response against the items. If
+  phase 4 changes the response (for example adds `currencyCode`), keep `totalAmount` or update
+  `check_order` in `tools/traffic_gen.py`.
+- **Checkpoint table:** the backfill made a small `MigrationCheckpoints` table. It can be dropped together
+  with `TotalAmount`.
+- The new columns are still nullable. If we want `NOT NULL` on them it should be done the safe way
+  (add `CHECK (... IS NOT NULL) NOT VALID`, `VALIDATE`, then `SET NOT NULL`), after the backfill.
 - The phase lives in memory of one API process. It goes back to `appsettings.json` on restart.
 
 ## Folder structure
@@ -381,6 +482,7 @@ After that `verify_dual_write.sql` showed 0 mismatched rows.
 ├── db/postgres/001_init.sql
 ├── db/postgres/cp2/     CP2 migration + verification scripts (run by hand)
 ├── GAMIQ.slnx
+├── tools/traffic_gen.py CP2 traffic generator
 └── src/GAMIQ.Api
     ├── Program.cs
     ├── Config/          .env loader
@@ -388,6 +490,7 @@ After that `verify_dual_write.sql` showed 0 mismatched rows.
     ├── Data/            AppDbContext, DbInitializer, Mongo/ (MongoContext, MongoSeeder)
     ├── Dtos/
     ├── Helpers/         converts JSON attributes so Mongo can save them
+    ├── Jobs/            CP2 BackfillJob
     ├── Models/          Postgres/ and Mongo/
     ├── Migrations/
     └── GAMIQ.Api.http

@@ -108,3 +108,15 @@ Content-Type: application/json
 {
   "phase": "Whatever"
 }
+
+### CP2: start the backfill in the background (API must be in DualWrite) -> 202, or 409 if it can't start
+POST {{host}}/migration/backfill
+Content-Type: application/json
+
+{
+  "batchSize": 100,
+  "delayMs": 50
+}
+
+### CP2: backfill progress -> 200
+GET {{host}}/migration/backfill
