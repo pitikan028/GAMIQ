@@ -61,6 +61,13 @@ public class BackfillJob
             return "The API is still in Legacy. Run 01_expand.sql and switch to DualWrite before the backfill.";
         }
 
+        // The job copies FROM TotalAmount. In Contract that column is not written anymore and
+        // may already be dropped.
+        if (_migration.Phase == MigrationPhase.Contract)
+        {
+            return "The API is in Contract, TotalAmount is not used anymore. There is nothing left to backfill.";
+        }
+
         lock (_startLock)
         {
             if (_status.State == "Running")

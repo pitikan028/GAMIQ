@@ -20,6 +20,7 @@ answers from a healthy API, they are counted but they are not errors.
 import argparse
 import json
 import random
+import re
 import sys
 import threading
 import time
@@ -47,6 +48,7 @@ lock = threading.Lock()
 results = []            # (method, status, milliseconds), status 0 = no answer
 bad_data = []           # what was wrong with a 2xx answer
 created_order_ids = []  # orders made in this run, so GET can read them back
+with_currency = [0]     # 2xx answers that had currencyCode, so they were read from the new columns
 
 
 def call(method, path, body=None):
@@ -79,6 +81,14 @@ def check_order(order, expected_id=None):
     items_total = sum(item["unitPrice"] * item["quantity"] for item in order["items"])
     if abs(order["totalAmount"] - items_total) > 0.005:
         return f"order {order['orderId']}: totalAmount {order['totalAmount']} but items add up to {items_total}"
+
+    # Phase 4: once the API reads the new columns the answer also has currencyCode. Before that
+    # the field is not there at all, which is fine. But if it is there it has to be a real code.
+    if "currencyCode" in order:
+        if not re.fullmatch("[A-Z]{3}", str(order["currencyCode"])):
+            return f"order {order['orderId']}: currencyCode is '{order['currencyCode']}'"
+        with lock:
+            with_currency[0] += 1
 
     return None
 
@@ -157,6 +167,9 @@ def summary(elapsed):
     server_errors = sum(status >= 500 for _, status, _ in done)
     failed = sum(status == 0 for _, status, _ in done)
     p99 = percentile(sorted(ms for _, _, ms in done), 99)
+
+    ok_answers = sum(200 <= status < 300 for _, status, _ in done)
+    print(f"\nRead from the new columns (answer has currencyCode): {with_currency[0]} of {ok_answers} 2xx answers")
 
     for problem in bad[:10]:
         print(f"BAD DATA: {problem}")

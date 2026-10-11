@@ -12,8 +12,10 @@ public class Order
 {
     public int OrderId { get; set; }
     public int UserId { get; set; }
-    // legacy: the order total, always THB because there was no currency column
-    public decimal TotalAmount { get; set; }
+    // legacy: the order total, always THB because there was no currency column.
+    // Nullable in C# only for the contract phase: orders made in Contract have NULL here until
+    // the column is dropped, and ReadNew must still be able to load them if we roll back.
+    public decimal? TotalAmount { get; set; }
 
     // CP2 new fields that replace TotalAmount. Nullable because old orders don't have them
     // until the backfill has run.
