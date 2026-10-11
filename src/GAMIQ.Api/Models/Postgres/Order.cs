@@ -12,7 +12,14 @@ public class Order
 {
     public int OrderId { get; set; }
     public int UserId { get; set; }
+    // legacy: the order total, always THB because there was no currency column
     public decimal TotalAmount { get; set; }
+
+    // CP2 new fields that replace TotalAmount. Nullable because old orders don't have them
+    // until the backfill has run.
+    public decimal? PriceAmount { get; set; }
+    public string? CurrencyCode { get; set; }
+
     public OrderStatus Status { get; set; } = OrderStatus.Pending;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 

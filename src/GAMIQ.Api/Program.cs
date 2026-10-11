@@ -2,6 +2,7 @@ using GAMIQ.Api.Config;
 using GAMIQ.Api.Data;
 using GAMIQ.Api.Data.Mongo;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 
 // connection strings come from .env (see .env.example), not appsettings.json
 DotEnv.Load();
@@ -19,7 +20,11 @@ if (string.IsNullOrWhiteSpace(postgresConnection))
         "ConnectionStrings:Postgres is not set. Copy .env.example to .env in the repo root first.");
 }
 
-builder.Services.AddDbContext<AppDbContext>(options => options.UseNpgsql(postgresConnection));
+// CP2: the current expand-contract phase, and one EF model per phase (see PhaseModelCacheKeyFactory)
+builder.Services.AddSingleton<MigrationState>();
+builder.Services.AddDbContext<AppDbContext>(options => options
+    .UseNpgsql(postgresConnection)
+    .ReplaceService<IModelCacheKeyFactory, PhaseModelCacheKeyFactory>());
 
 builder.Services.Configure<MongoOptions>(builder.Configuration.GetSection("MongoDb"));
 builder.Services.AddSingleton<MongoContext>();

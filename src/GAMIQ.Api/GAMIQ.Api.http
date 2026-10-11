@@ -89,3 +89,22 @@ Content-Type: application/json
 
 ### Get order -> 200
 GET {{host}}/orders/1
+
+### CP2: current migration phase -> 200
+GET {{host}}/migration/phase
+
+### CP2: turn on dual write (run db/postgres/cp2/01_expand.sql first) -> 200
+PUT {{host}}/migration/phase
+Content-Type: application/json
+
+{
+  "phase": "DualWrite"
+}
+
+### CP2: unknown phase -> 400
+PUT {{host}}/migration/phase
+Content-Type: application/json
+
+{
+  "phase": "Whatever"
+}

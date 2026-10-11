@@ -1,3 +1,4 @@
+using GAMIQ.Api.Config;
 using GAMIQ.Api.Data;
 using GAMIQ.Api.Data.Mongo;
 using GAMIQ.Api.Dtos;
@@ -93,6 +94,14 @@ public class OrdersController : ControllerBase
             CreatedAt = DateTime.UtcNow,
             Items = orderItems
         };
+
+        // CP2 Phase 2 (dual write): also fill the new columns. Both go out in the same INSERT as
+        // TotalAmount, so an order can never have the old value without the new one.
+        if (_db.Phase >= MigrationPhase.DualWrite)
+        {
+            order.PriceAmount = total;
+            order.CurrencyCode = user.Account.Currency;
+        }
 
         var takenStock = new List<(string ProductId, int Quantity)>();
 

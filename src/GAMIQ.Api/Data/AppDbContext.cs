@@ -1,3 +1,4 @@
+using GAMIQ.Api.Config;
 using GAMIQ.Api.Models.Postgres;
 using Microsoft.EntityFrameworkCore;
 
@@ -5,9 +6,13 @@ namespace GAMIQ.Api.Data;
 
 public class AppDbContext : DbContext
 {
-    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options)
+    public AppDbContext(DbContextOptions<AppDbContext> options, MigrationState migration) : base(options)
     {
+        // read once, so one request uses the same phase for the model and for the controller logic
+        Phase = migration.Phase;
     }
+
+    public MigrationPhase Phase { get; }
 
     public DbSet<User> Users => Set<User>();
     public DbSet<Account> Accounts => Set<Account>();
@@ -43,9 +48,32 @@ public class AppDbContext : DbContext
         {
             entity.HasKey(o => o.OrderId);
             entity.HasIndex(o => new { o.UserId, o.CreatedAt });
-            entity.Property(o => o.TotalAmount).HasColumnType("decimal(18,2)");
             entity.Property(o => o.Status).HasConversion<string>().HasMaxLength(20);
-            entity.ToTable(t => t.HasCheckConstraint("CK_Orders_TotalAmount", "\"TotalAmount\" >= 0"));
+
+            // CP2: which price columns EF may touch depends on the migration phase.
+            // An ignored property is left out of every SELECT / INSERT, so the API never asks
+            // for a column that doesn't exist yet (Legacy) or was already dropped (Contract).
+            if (Phase == MigrationPhase.Contract)
+            {
+                entity.Ignore(o => o.TotalAmount);
+            }
+            else
+            {
+                entity.Property(o => o.TotalAmount).HasColumnType("decimal(18,2)");
+                entity.ToTable(t => t.HasCheckConstraint("CK_Orders_TotalAmount", "\"TotalAmount\" >= 0"));
+            }
+
+            if (Phase == MigrationPhase.Legacy)
+            {
+                entity.Ignore(o => o.PriceAmount);
+                entity.Ignore(o => o.CurrencyCode);
+            }
+            else
+            {
+                entity.Property(o => o.PriceAmount).HasColumnType("decimal(18,2)");
+                entity.Property(o => o.CurrencyCode).HasMaxLength(3);
+            }
+
             entity.HasOne(o => o.User)
                   .WithMany(u => u.Orders)
                   .HasForeignKey(o => o.UserId)

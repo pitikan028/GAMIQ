@@ -284,6 +284,94 @@ in `.gitignore`, so only `.env.example` is in git. `Config/DotEnv.cs` loads the 
 starts. If you forget to create `.env`, the app stops right away and tells you to copy
 `.env.example`.
 
+## CP2: Zero-downtime schema migration (in progress)
+
+**Scenario.** `Orders.TotalAmount` is one number and the currency is not stored anywhere, we just
+assumed THB. To sell in other currencies later we replace it with two columns,
+`Orders.PriceAmount` + `Orders.CurrencyCode`, using expand-contract, while the API keeps taking
+orders.
+
+| # | Phase | What happens | Status |
+|---|---|---|---|
+| 1 | Expand | `db/postgres/cp2/01_expand.sql` adds the two new columns next to `TotalAmount` | done |
+| 2 | Dual write | `POST /orders` writes `TotalAmount` and `PriceAmount` + `CurrencyCode` | done |
+| 3 | Backfill | copy `TotalAmount` into the new columns for old orders, in batches | to do |
+| 4 | Switch read | `GET /orders/{id}` reads the new columns | to do |
+| 5 | Contract | drop `TotalAmount` | to do |
+
+Also still to do: the traffic generator, the before/after backfill verification queries and the
+fallback video.
+
+### How the API changes phase without a restart
+
+Restarting the API in the middle of the migration would already be downtime, so the phase is a
+runtime setting (`Config/MigrationState.cs`). It starts from `Migration:Phase` in
+`appsettings.json` (default `Legacy`) and is changed with one request:
+
+```bash
+curl -X PUT http://localhost:5087/api/v1/migration/phase -H "Content-Type: application/json" -d '{"phase":"DualWrite"}'
+curl http://localhost:5087/api/v1/migration/phase
+```
+
+The phases are `Legacy`, `DualWrite`, `ReadNew`, `Contract`.
+
+EF Core puts every mapped column in its SELECT and INSERT, so it would crash on a column that
+isn't there yet (before expand) or is already gone (after contract). `AppDbContext` therefore maps
+`Orders` differently per phase, and `PhaseModelCacheKeyFactory` makes EF keep one model per phase:
+
+| Phase | `TotalAmount` | `PriceAmount`, `CurrencyCode` |
+|---|---|---|
+| Legacy | mapped | ignored |
+| DualWrite, ReadNew | mapped | mapped |
+| Contract | ignored | mapped |
+
+### Running phase 1 and 2
+
+Start the API as usual (it is in `Legacy`), then with traffic running:
+
+```bash
+# Phase 1 - expand
+docker exec gamiq_postgres psql -U dev_user -d main_db -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/cp2/01_expand.sql
+
+# Phase 2 - dual write
+curl -X PUT http://localhost:5087/api/v1/migration/phase -H "Content-Type: application/json" -d '{"phase":"DualWrite"}'
+
+# check
+docker exec gamiq_postgres psql -U dev_user -d main_db -f /docker-entrypoint-initdb.d/cp2/verify_dual_write.sql
+```
+
+The order matters: expand first, then dual write. In `DualWrite` the API asks for the new columns,
+so they have to exist already.
+
+Why this doesn't block or break anything:
+
+- The new columns are nullable with no default, so Postgres only changes the catalog and does not
+  rewrite the table. The `ALTER TABLE` takes a few milliseconds.
+- The script sets `lock_timeout = 2s`. If something holds the table, the script fails fast and we
+  run it again, instead of making every order wait behind it.
+- The new CHECK constraint is added `NOT VALID`, so old rows are not scanned under the lock.
+- Old and new values go out in the same `INSERT`, so an order can't have one without the other.
+- Seeded orders are left with `NULL` in the new columns on purpose. They are the "old data" for the backfill.
+
+We tested phase 1 and 2 with about 34 requests/second (half `POST /orders`, half `GET /orders/{id}`)
+running during the expand script and the switch to dual write: 1,023 requests, no 5xx, p99 164 ms.
+After that `verify_dual_write.sql` showed 0 mismatched rows.
+
+### Notes for phase 3 to 5
+
+- **Backfill:** only touch rows `WHERE "PriceAmount" IS NULL`, walk the table by `OrderId` in small
+  batches with one short transaction each, and set `CurrencyCode = 'THB'`. Start it only after the
+  API is in `DualWrite`. After it finishes: `ALTER TABLE "Orders" VALIDATE CONSTRAINT "CK_Orders_PriceAmount";`
+- **Switch read:** in `OrdersController.ToResponse`, use `PriceAmount` when the phase is `ReadNew` or later.
+  Right now the response still reads `TotalAmount` in every phase.
+- **Contract:** `TotalAmount` is `NOT NULL`, and in `Contract` the API stops sending it. So the order
+  is: `ALTER COLUMN "TotalAmount" DROP NOT NULL`, switch the API to `Contract`, then `DROP COLUMN`.
+  `DbInitializer` still seeds `TotalAmount` only and needs the new columns too.
+- **Traffic generator:** new users have 0 THB and seeded wallets run out quickly at 20 requests/second, which
+  gives 422 instead of 201. Top the wallets up before the demo. Two orders for the same user at the
+  same moment give 409 (wallet row version), which is expected and not an error.
+- The phase lives in memory of one API process. It goes back to `appsettings.json` on restart.
+
 ## Folder structure
 
 ```
@@ -291,6 +379,7 @@ starts. If you forget to create `.env`, the app stops right away and tells you t
 ├── docker-compose.yml
 ├── .env.example
 ├── db/postgres/001_init.sql
+├── db/postgres/cp2/     CP2 migration + verification scripts (run by hand)
 ├── GAMIQ.slnx
 └── src/GAMIQ.Api
     ├── Program.cs
