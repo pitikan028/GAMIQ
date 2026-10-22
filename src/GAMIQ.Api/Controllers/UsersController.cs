@@ -70,7 +70,96 @@ public class UsersController : ControllerBase
             return NotFound(new { message = $"User {id} not found." });
         }
 
+        SetWalletETag(user.Account);
         return Ok(ToResponse(user));
+    }
+
+    // POST /api/v1/users/{id}/wallet/topup
+    // CP3 optimistic concurrency: the UPDATE only matches if the wallet's xmin is still the one we
+    // read. If another request changed the wallet in between, nothing is written and the client
+    // gets 409 and has to retry, so a top-up can never overwrite (lose) another one.
+    // Optional If-Match: the client sends the ETag from GET /users/{id}. If the wallet changed since
+    // then the answer is 412, also when the change happens between our read and our UPDATE.
+    [HttpPost("{id:int}/wallet/topup")]
+    public async Task<ActionResult<UserResponse>> TopUp(int id, TopUpRequest request)
+    {
+        if (decimal.Round(request.Amount, 2) != request.Amount)
+        {
+            return BadRequest(new { message = "Amount can have at most 2 decimals." });
+        }
+
+        var ifMatch = Request.Headers.IfMatch.ToString();
+        uint? expectedVersion = null;
+        if (!string.IsNullOrEmpty(ifMatch))
+        {
+            if (!TryParseETag(ifMatch, out var parsed))
+            {
+                return BadRequest(new { message = "If-Match must be the ETag from GET /users/{id}, for example \"12345\"." });
+            }
+            expectedVersion = parsed;
+        }
+
+        var user = await _db.Users.Include(u => u.Account).FirstOrDefaultAsync(u => u.UserId == id);
+        if (user is null)
+        {
+            return NotFound(new { message = $"User {id} not found." });
+        }
+
+        if (user.Account is null)
+        {
+            return UnprocessableEntity(new { message = "User has no wallet account." });
+        }
+
+        if (expectedVersion is not null)
+        {
+            if (expectedVersion != user.Account.Version)
+            {
+                SetWalletETag(user.Account);
+                return StatusCode(StatusCodes.Status412PreconditionFailed,
+                    new { message = "Wallet was changed since you read it. Read it again (GET /users/{id}) and retry." });
+            }
+
+            // compare against the client's version in the UPDATE itself, not only in the check above
+            _db.Entry(user.Account).Property(a => a.Version).OriginalValue = expectedVersion.Value;
+        }
+
+        user.Account.Balance += request.Amount;
+
+        try
+        {
+            await _db.SaveChangesAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            if (expectedVersion is not null)
+            {
+                return StatusCode(StatusCodes.Status412PreconditionFailed,
+                    new { message = "Wallet was changed since you read it. Read it again (GET /users/{id}) and retry." });
+            }
+            return Conflict(new { message = "Wallet was updated by another request, please try again." });
+        }
+
+        // Npgsql reads the new xmin back after the UPDATE, so this is the version of the row we wrote
+        SetWalletETag(user.Account);
+        return Ok(ToResponse(user));
+    }
+
+    private void SetWalletETag(Account? account)
+    {
+        if (account is not null)
+        {
+            Response.Headers.ETag = $"\"{account.Version}\"";
+        }
+    }
+
+    private static bool TryParseETag(string value, out uint version)
+    {
+        var trimmed = value.Trim();
+        if (trimmed.StartsWith("W/"))
+        {
+            trimmed = trimmed[2..];
+        }
+        return uint.TryParse(trimmed.Trim('"'), out version);
     }
 
     private static UserResponse ToResponse(User user) =>

@@ -1,6 +1,6 @@
 # GAMIQ - Game Marketplace API
 
-269340 Data Centric Application Development (2026) - Team Project Checkpoint 1 + 2
+269340 Data Centric Application Development (2026) - Team Project Checkpoint 1 + 2 + 3
 
 GAMIQ is our backend for a small online game store (kind of like a mini Steam). Users have a
 wallet in THB, they can browse games and buy them. We used ASP.NET Core 8 Web API with
@@ -8,14 +8,15 @@ PostgreSQL (EF Core) and MongoDB.
 
 Checkpoint 1 (the API and both databases) is the first part of this README. Checkpoint 2 (the
 zero-downtime schema migration) starts at [CP2: Zero-downtime schema migration](#cp2-zero-downtime-schema-migration).
+Checkpoint 3 (concurrency and performance) starts at [CP3: Concurrency control and performance audit](#cp3-concurrency-control-and-performance-audit).
 
 ## Team
 
-| Student ID | Name | CP1 part | CP2 part |
-|---|---|---|---|
-| 670615021 | Yanisa Khankhumnanta | PostgreSQL | Phase 3 backfill job, backfill verification queries, traffic generator |
-| 670615023 | Natthawan Saengsrichan | Docker + MongoDB | Phase 4 switch read, phase 5 contract, fallback video |
-| 670615028 | Pitikan Kanjanasiri | API endpoints | Migration phase switch, phase 1 expand, phase 2 dual write |
+| Student ID | Name | CP1 part | CP2 part | CP3 part |
+|---|---|---|---|---|
+| 670615021 | Yanisa Khankhumnanta | PostgreSQL | Phase 3 backfill job, backfill verification queries, traffic generator | |
+| 670615023 | Natthawan Saengsrichan | Docker + MongoDB | Phase 4 switch read, phase 5 contract, fallback video | |
+| 670615028 | Pitikan Kanjanasiri | API endpoints | Migration phase switch, phase 1 expand, phase 2 dual write | Concurrency control (wallet top-up with OCC, `If-Match` / 412), `tools/test_concurrency.py` |
 
 ### Who did what (CP1)
 
@@ -210,7 +211,8 @@ Base URL: `http://localhost:5087/api/v1`
 | Method | Route | Description | DB |
 |---|---|---|---|
 | POST | `/users` | create a user (also creates a wallet with 0 THB) | PostgreSQL |
-| GET | `/users/{id}` | get a user and their balance | PostgreSQL |
+| GET | `/users/{id}` | get a user and their balance (`ETag` header = wallet version) | PostgreSQL |
+| POST | `/users/{id}/wallet/topup` | add money to the wallet, optional `If-Match` (CP3) | PostgreSQL |
 | GET | `/products?page=1&pageSize=20` | catalog with paging, `&genre=RPG` is optional | MongoDB |
 | GET | `/products/{id}` | get one game | MongoDB |
 | POST | `/products` | add a game, `attributes` can be any JSON | MongoDB |
@@ -223,6 +225,8 @@ Status codes we return:
 - `400` for bad input: missing fields, bad email, quantity 0, invalid ObjectId, broken JSON
 - `404` when the user, product or order doesn't exist
 - `409` when the username or email is already taken, or the stock or wallet changed while ordering
+  or topping up
+- `412` when a top-up sends `If-Match` and the wallet was changed since that version was read
 - `422` when there isn't enough stock or money
 
 ## How an order works
@@ -626,6 +630,111 @@ Other things we tested:
   the steps we run by hand (they are seconds apart), but `03_contract.sql` should not be started
   in the same second as the switch to `Contract`.
 
+## CP3: Concurrency control and performance audit
+
+| Part | What | Rubric | Status |
+|---|---|---|---|
+| 1 | Concurrency control + `tools/test_concurrency.py` | 35 | done |
+| 2 | Query projection (`.Select()`) and no N+1 in list endpoints | 35 | to do |
+| 3 | k6 / Locust load test, 50 VUs for 3 minutes | 20 | to do |
+| 4 | Performance audit report with charts and metrics | 10 | to do |
+
+### Part 1: Concurrency control
+
+We use **optimistic concurrency control (Option A)**. The version token is the Postgres system
+column `xmin` of the `Accounts` row (`Account.Version`, `IsRowVersion()` in `AppDbContext`).
+`xmin` changes on every update of a row, so we don't need an extra column or a trigger to keep a
+version number up to date.
+
+EF Core adds the version we read to the `WHERE` of the `UPDATE`:
+
+```sql
+UPDATE "Accounts" SET "Balance" = @new WHERE "AccountId" = @id AND xmin = @versionWeRead
+RETURNING xmin;
+```
+
+If another request changed the wallet in between, the `UPDATE` matches 0 rows, nothing is
+written, EF throws `DbUpdateConcurrencyException` and the API answers `409 Conflict` so the client
+retries. A second writer that hits the row while the first one's transaction is still open waits
+for the row lock, then sees the new `xmin` and also gets 0 rows. So two writers can never both
+"win" with the same old balance (no lost update).
+
+Where it is used:
+
+| Shared resource | Endpoint | How it is protected | Answer when it loses the race |
+|---|---|---|---|
+| wallet balance | `POST /users/{id}/wallet/topup` | `xmin` version check | `409` |
+| wallet balance | `POST /users/{id}/wallet/topup` with `If-Match` | the client's version is used in the `WHERE` | `412` |
+| wallet balance | `POST /orders` | `xmin` version check (from CP1) | `409` |
+| game stock (Mongo) | `POST /orders` | `updateOne({_id, Stock >= qty}, {$inc: {Stock: -qty}})`, atomic in Mongo | `409` (or `422` if it already read stock 0) |
+| wallet balance | everywhere | `CHECK ("Balance" >= 0)` as last line of defence | - |
+
+**`If-Match` / `412`.** `GET /users/{id}` sends the wallet version as an `ETag` header. A client
+can send it back in `If-Match` on a top-up: "only do this if the wallet is still the one I saw".
+If the version is already different we answer `412` right away. If it changes between our read and
+our `UPDATE`, the client's version is the one in the `WHERE` (we set it as EF's original value),
+so that case is a `412` too and not a silent overwrite.
+
+```bash
+curl -i http://localhost:5087/api/v1/users/1                       # ETag: "739"
+curl -X POST http://localhost:5087/api/v1/users/1/wallet/topup \
+     -H "Content-Type: application/json" -H 'If-Match: "739"' -d '{"amount":500}'   # 200, new ETag
+# the same request again -> 412, the wallet is not "739" anymore
+```
+
+**Why optimistic and not `SELECT ... FOR UPDATE`.** A wallet is almost always changed by one
+request at a time (one user, one click), so conflicts are rare and we don't want every order to
+hold a lock. With OCC a request never waits for a lock it doesn't need. It also works for the
+Mongo stock, where there is no `SELECT FOR UPDATE`: the condition `Stock >= qty` inside one
+`updateOne` is the same idea (check and write in one atomic step).
+
+**What a failed order leaves behind.** Nothing. If the Mongo stock update loses, the stock that
+was already taken is put back and the Postgres transaction (order + money) is rolled back. The test
+below checks this from the outside: the losers' balances are unchanged and stock went down only
+once.
+
+### Concurrency verification (`tools/test_concurrency.py`)
+
+The script makes its own users and products every run (nothing to reset), and uses a
+`threading.Barrier` so all requests leave at the same moment. Only needs Python 3.9+.
+
+```bash
+python3 tools/test_concurrency.py                 # 20 concurrent requests per test
+python3 tools/test_concurrency.py --workers 50
+```
+
+| Test | Setup | Must hold |
+|---|---|---|
+| 1. last copy | game with stock 1, 20 users with enough money buy it at once | exactly one `201`, the rest `409` / `422`, stock 0, only the winner paid |
+| 2. same wallet | wallet with 100 THB, 20 orders of a 100 THB game at once | exactly one `201`, balance 0, stock went down once |
+| 3. top-up race | 20 top-ups of 10 THB on one wallet at once, no retry | balance = 10 x number of `200`, the rest `409` |
+| 4. top-up retry | the same, but every client retries on `409` | all 20 succeed, balance exactly 200 |
+| 5. `If-Match` | 20 top-ups that all send the same `ETag` | exactly one `200`, 19 x `412` |
+
+Test 3 is the lost update check: without the version check, all 20 top-ups would read balance 0
+and write 10, so the API would say `200` twenty times and the balance would be 10.
+
+Our results (fresh database, API on a laptop):
+
+```
+Concurrent Test Results -> Successes: 1 (Must be 1) | Conflicts: 12 | Out of stock: 7
+[PASS] 1. last copy: 20 users buy the last copy at the same moment       201 x1, 409 x12, 422 x7
+[PASS] 2. same wallet: 20 orders from one wallet that can pay for 1       201 x1, 409 x18, 422 x1
+[PASS] 3. top-up race: 20 top-ups of 10 THB on one wallet, no retry       200 x2, 409 x18 -> balance 20
+[PASS] 4. top-up retry: 20 top-ups of 10 THB, client retries on 409       200 x20 -> balance 200 (43 retries)
+[PASS] 5. If-Match: 20 top-ups that all send ETag "921"                   200 x1, 412 x19
+5 of 5 tests passed
+```
+
+With `--workers 50` all five passed as well (last copy: `201` x1, `409` x33, `422` x16;
+`If-Match`: `200` x1, `412` x49).
+
+### Part 2: Query projection and N+1 (to do)
+
+### Part 3: Load test (to do)
+
+### Part 4: Performance audit report (to do)
+
 ## Folder structure
 
 ```
@@ -637,6 +746,7 @@ Other things we tested:
 ├── GAMIQ.slnx
 ├── tools/traffic_gen.py CP2 traffic generator
 ├── tools/run_migration.sh  CP2: runs all five phases in order
+├── tools/test_concurrency.py  CP3: race condition / lost update tests
 └── src/GAMIQ.Api
     ├── Program.cs
     ├── Config/          .env loader

@@ -140,3 +140,32 @@ Content-Type: application/json
 {
   "phase": "Contract"
 }
+
+### CP3: read the wallet, the ETag header is the wallet version -> 200
+GET {{host}}/users/1
+
+### CP3: top up the wallet -> 200, or 409 if another request changed the wallet at the same moment
+POST {{host}}/users/1/wallet/topup
+Content-Type: application/json
+
+{
+  "amount": 500
+}
+
+### CP3: top up only if the wallet is still the version you read -> 200, or 412 if it changed
+# paste the ETag from GET /users/1 (with the quotes)
+POST {{host}}/users/1/wallet/topup
+Content-Type: application/json
+If-Match: "PASTE_ETAG"
+
+{
+  "amount": 500
+}
+
+### CP3: more than 2 decimals -> 400
+POST {{host}}/users/1/wallet/topup
+Content-Type: application/json
+
+{
+  "amount": 1.234
+}
