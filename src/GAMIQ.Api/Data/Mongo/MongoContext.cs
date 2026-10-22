@@ -1,6 +1,7 @@
 using GAMIQ.Api.Models.Mongo;
 using Microsoft.Extensions.Options;
 using MongoDB.Driver;
+using MongoDB.Driver.Core.Events;
 
 namespace GAMIQ.Api.Data.Mongo;
 
@@ -14,9 +15,25 @@ public class MongoContext
 {
     private readonly IMongoDatabase _database;
 
-    public MongoContext(IOptions<MongoOptions> options)
+    // commands the driver sends by itself to open and check connections, not part of our queries
+    private static readonly HashSet<string> ConnectionCommands = new(StringComparer.OrdinalIgnoreCase)
     {
-        var client = new MongoClient(options.Value.ConnectionString);
+        "hello", "isMaster", "saslStart", "saslContinue", "buildInfo", "ping", "endSessions"
+    };
+
+    public MongoContext(IOptions<MongoOptions> options, QueryCounter counter)
+    {
+        // CP3: count every command an HTTP request sends to Mongo (see QueryCounter)
+        var settings = MongoClientSettings.FromConnectionString(options.Value.ConnectionString);
+        settings.ClusterConfigurator = cluster => cluster.Subscribe<CommandStartedEvent>(e =>
+        {
+            if (!ConnectionCommands.Contains(e.CommandName))
+            {
+                counter.AddMongo();
+            }
+        });
+
+        var client = new MongoClient(settings);
         _database = client.GetDatabase(options.Value.DatabaseName);
     }
 

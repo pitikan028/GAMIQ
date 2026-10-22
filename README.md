@@ -14,7 +14,7 @@ Checkpoint 3 (concurrency and performance) starts at [CP3: Concurrency control a
 
 | Student ID | Name | CP1 part | CP2 part | CP3 part |
 |---|---|---|---|---|
-| 670615021 | Yanisa Khankhumnanta | PostgreSQL | Phase 3 backfill job, backfill verification queries, traffic generator | |
+| 670615021 | Yanisa Khankhumnanta | PostgreSQL | Phase 3 backfill job, backfill verification queries, traffic generator | Query projection (`.Select()`) and N+1 removal, `GET /users/{id}/orders`, query counter, `tools/check_queries.py` |
 | 670615023 | Natthawan Saengsrichan | Docker + MongoDB | Phase 4 switch read, phase 5 contract, fallback video | |
 | 670615028 | Pitikan Kanjanasiri | API endpoints | Migration phase switch, phase 1 expand, phase 2 dual write | Concurrency control (wallet top-up with OCC, `If-Match` / 412), `tools/test_concurrency.py` |
 
@@ -213,11 +213,12 @@ Base URL: `http://localhost:5087/api/v1`
 | POST | `/users` | create a user (also creates a wallet with 0 THB) | PostgreSQL |
 | GET | `/users/{id}` | get a user and their balance (`ETag` header = wallet version) | PostgreSQL |
 | POST | `/users/{id}/wallet/topup` | add money to the wallet, optional `If-Match` (CP3) | PostgreSQL |
-| GET | `/products?page=1&pageSize=20` | catalog with paging, `&genre=RPG` is optional | MongoDB |
+| GET | `/products?page=1&pageSize=20` | catalog with paging, `&genre=RPG` is optional (list fields only since CP3) | MongoDB |
 | GET | `/products/{id}` | get one game | MongoDB |
 | POST | `/products` | add a game, `attributes` can be any JSON | MongoDB |
 | POST | `/orders` | buy games (pay from wallet + cut stock) | PostgreSQL + MongoDB |
 | GET | `/orders/{id}` | get an order with its items | PostgreSQL |
+| GET | `/users/{id}/orders?page=1&pageSize=20` | order history of a user, newest first (CP3) | PostgreSQL |
 
 Status codes we return:
 
@@ -635,7 +636,7 @@ Other things we tested:
 | Part | What | Rubric | Status |
 |---|---|---|---|
 | 1 | Concurrency control + `tools/test_concurrency.py` | 35 | done |
-| 2 | Query projection (`.Select()`) and no N+1 in list endpoints | 35 | to do |
+| 2 | Query projection (`.Select()`) and no N+1 in list endpoints + `tools/check_queries.py` | 35 | done |
 | 3 | k6 / Locust load test, 50 VUs for 3 minutes | 20 | to do |
 | 4 | Performance audit report with charts and metrics | 10 | to do |
 
@@ -729,7 +730,122 @@ Concurrent Test Results -> Successes: 1 (Must be 1) | Conflicts: 12 | Out of sto
 With `--workers 50` all five passed as well (last copy: `201` x1, `409` x33, `422` x16;
 `If-Match`: `200` x1, `412` x49).
 
-### Part 2: Query projection and N+1 (to do)
+### Part 2: Query projection and N+1
+
+Every read endpoint now asks the database for exactly the fields of its answer, and the number of
+queries does not depend on how much data comes back.
+
+**Projection.** Before, the endpoints loaded whole entities (`Include` + `FirstOrDefaultAsync`)
+and built the answer from them in C#. Now they use `.Select()` into the answer's fields, so EF
+writes a `SELECT` with only those columns. A projection is never tracked by EF, so there is no
+change-tracking work on reads either.
+
+| Endpoint | Before | After |
+|---|---|---|
+| `GET /users/{id}` | 11 columns, including `PasswordHash` and 5 wallet columns | 7 columns: the 6 of the answer + `xmin` for the `ETag`. The password hash is never read |
+| `GET /orders/{id}` | every column of `Orders` and `OrderItems` | only the columns of the answer. In `Contract` the dropped `TotalAmount` is not mentioned at all |
+| `GET /products` | whole Mongo documents, with `Description` and `Attributes` | Mongo projection `{_id, Name, Price, Stock, Genres, Platforms}`. A page of 100 games went from 57,814 to 16,730 bytes of JSON (71 KB to 20 KB of BSON from Mongo) |
+| `GET /users/{id}/orders` | (did not exist) | new list endpoint, see below |
+
+`GET /products/{id}` still returns the full game, because its answer needs every field.
+
+The SQL EF sends now (copied from the EF log):
+
+```sql
+-- GET /users/{id}
+SELECT u."UserId", u."Username", u."Email", u."CreatedAt", a."Balance", a."Currency", a.xmin AS "Version"
+FROM "Users" AS u
+LEFT JOIN "Accounts" AS a ON u."UserId" = a."UserId"
+WHERE u."UserId" = @__id_0
+LIMIT 1
+
+-- GET /orders/{id}: the order and its items in one query
+SELECT t."OrderId", t."UserId", t."TotalAmount", t."Status", t."CreatedAt",
+       o0."ProductId", o0."ProductName", o0."UnitPrice", o0."Quantity", o0."OrderItemId"
+FROM (SELECT o."OrderId", o."UserId", o."TotalAmount", o."Status", o."CreatedAt"
+      FROM "Orders" AS o WHERE o."OrderId" = @__id_0 LIMIT 1) AS t
+LEFT JOIN "OrderItems" AS o0 ON t."OrderId" = o0."OrderId"
+ORDER BY t."OrderId", o0."OrderItemId"
+```
+
+(From `ReadNew` on, the order queries select `PriceAmount` and `CurrencyCode` instead of
+`TotalAmount`, same CP2 rule as before.)
+
+**No N+1: `GET /users/{id}/orders`.** The list summary of a user's orders. The slow way would
+be to load the orders and then the items of each order in a loop (1 + N queries). Instead the
+item count and quantity are counted by Postgres inside the same query:
+
+```sql
+SELECT o."OrderId", o."TotalAmount", o."Status", o."CreatedAt",
+       (SELECT count(*)::int FROM "OrderItems" AS o0 WHERE o."OrderId" = o0."OrderId"),
+       (SELECT COALESCE(sum(o1."Quantity"), 0)::int FROM "OrderItems" AS o1 WHERE o."OrderId" = o1."OrderId")
+FROM "Orders" AS o
+WHERE o."UserId" = @__userId_0
+ORDER BY o."CreatedAt" DESC, o."OrderId" DESC
+LIMIT @__p_2 OFFSET @__p_1
+```
+
+The endpoint always sends 3 queries: does the user exist (so an unknown user is `404` and not
+an empty list), `count(*)` for paging, and the page above. Both filters use the existing
+`Orders(UserId, CreatedAt)` index and the `OrderItems.OrderId` index.
+
+```bash
+curl "http://localhost:5087/api/v1/users/260/orders?page=1&pageSize=20"
+```
+
+**How we count the queries.** `Data/QueryCounter.cs` counts every round trip of one HTTP request:
+an EF Core `DbCommandInterceptor` for SQL, and a Mongo driver `CommandStartedEvent` subscriber
+for Mongo (connection handshakes are not counted). In Development every answer carries the result:
+
+```
+X-Sql-Queries: 1
+X-Mongo-Commands: 0
+```
+
+To see the SQL itself, start the API with
+`Logging__LogLevel__Microsoft.EntityFrameworkCore.Database.Command=Information`.
+
+### N+1 check (`tools/check_queries.py`)
+
+The script makes its own user, products and orders every run, then compares the query count of
+each endpoint for a small and a big answer. With N+1 the big one would need more queries.
+
+```bash
+python3 tools/check_queries.py
+```
+
+| Check | Small | Big | Must hold |
+|---|---|---|---|
+| 1. `GET /users/{id}` | - | - | 1 SQL query |
+| 2. `GET /orders/{id}` | 1 item | 10 items | 1 SQL query both times |
+| 3. `GET /users/{id}/orders` | 1 order | 50 orders | same count both times, at most 3 |
+| 4. `GET /products` | 1 game | 100 games | 2 Mongo commands both times, 0 SQL |
+| 5. paging | | | `pageSize=1` gives 1 of 50 orders, 50 pages |
+
+Our results (fresh database, API on a laptop):
+
+```
+[PASS] 1. GET /users/{id}                                   status 200, 1 SQL
+[PASS] 2. GET /orders/{id}, 1 item vs 10 items              1 SQL vs 1 SQL
+[PASS] 3. GET /users/{id}/orders, 1 order vs 50 orders      3 SQL vs 3 SQL
+[PASS] 4. GET /products, 1 game vs 100 games                2 Mongo vs 2 Mongo, 0 SQL
+[PASS] 5. paging: GET /users/{id}/orders?pageSize=1         1 of 50 orders, 50 pages
+5 of 5 checks passed
+```
+
+We ran it twice: on a fresh database (API in `Legacy`) and again after running the whole CP2
+migration to `Contract` (where the queries read `PriceAmount` and `TotalAmount` is dropped). Both
+times 5 of 5. In the same session `tools/test_concurrency.py` still passed 5 of 5, and
+`tools/traffic_gen.py` during the CP2 migration still gave 0 5xx, 0 bad data, p99 23 ms.
+
+Notes for part 3 and 4:
+
+- The load test should read through these endpoints, for example `GET /users/{id}/orders` and
+  `GET /products` next to `POST /orders`, so the report measures the optimised queries.
+- `X-Sql-Queries` / `X-Mongo-Commands` exist only in Development. The counter itself is very
+  cheap, but it is an extra step in every request, which is worth a sentence in the report.
+- Seeded users have 0 to 3 orders. For a heavier `GET /users/{id}/orders` in the load test, place
+  some orders for a few users first (`tools/check_queries.py` shows how).
 
 ### Part 3: Load test (to do)
 
@@ -747,11 +863,12 @@ With `--workers 50` all five passed as well (last copy: `201` x1, `409` x33, `42
 ├── tools/traffic_gen.py CP2 traffic generator
 ├── tools/run_migration.sh  CP2: runs all five phases in order
 ├── tools/test_concurrency.py  CP3: race condition / lost update tests
+├── tools/check_queries.py  CP3: N+1 check (query count per request)
 └── src/GAMIQ.Api
     ├── Program.cs
     ├── Config/          .env loader
     ├── Controllers/     Users, Products, Orders
-    ├── Data/            AppDbContext, DbInitializer, MigrationGuard, Mongo/ (MongoContext, MongoSeeder)
+    ├── Data/            AppDbContext, DbInitializer, MigrationGuard, QueryCounter, Mongo/ (MongoContext, MongoSeeder)
     ├── Dtos/
     ├── Helpers/         converts JSON attributes so Mongo can save them
     ├── Jobs/            CP2 BackfillJob

@@ -23,3 +23,14 @@ public record OrderResponse(
     string Status,
     DateTime CreatedAt,
     List<OrderItemResponse> Items);
+
+// CP3: one line of GET /users/{id}/orders. The item count and quantity are counted by the
+// database in the same query, the items themselves are not loaded.
+public record OrderSummaryResponse(
+    int OrderId,
+    decimal TotalAmount,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? CurrencyCode,
+    string Status,
+    DateTime CreatedAt,
+    int ItemCount,
+    int TotalQuantity);

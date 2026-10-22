@@ -150,20 +150,67 @@ public class OrdersController : ControllerBase
     }
 
     // GET /api/v1/orders/{id}
+    // CP3: projection. The order and its items come back in ONE SQL query (a LEFT JOIN), and
+    // only the columns the answer needs are selected. No entity is built or tracked.
     [HttpGet("{id:int}")]
     public async Task<ActionResult<OrderResponse>> GetOrder(int id)
     {
-        var order = await _db.Orders
-            .AsNoTracking()
-            .Include(o => o.Items)
-            .FirstOrDefaultAsync(o => o.OrderId == id);
+        var row = await SelectOrderRows(_db.Orders.Where(o => o.OrderId == id)).FirstOrDefaultAsync();
 
-        if (order is null)
+        if (row is null)
         {
             return NotFound(new { message = $"Order {id} not found." });
         }
 
-        return Ok(ToResponse(order));
+        return Ok(ToResponse(row));
+    }
+
+    // GET /api/v1/users/{userId}/orders?page=1&pageSize=20
+    // CP3: the order history of one user, newest first. The number of SQL queries is the same
+    // (3) no matter how many orders or items there are:
+    //   1. does the user exist (so an unknown user is 404 and not an empty list)
+    //   2. count the orders for paging
+    //   3. the page itself, with the item count and quantity counted by Postgres in the same
+    //      query. A loop that loads the items of every order one by one would be N+1.
+    [HttpGet("~/api/v1/users/{userId:int}/orders")]
+    public async Task<ActionResult<PagedResult<OrderSummaryResponse>>> GetUserOrders(
+        int userId,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20)
+    {
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
+        if (!await _db.Users.AnyAsync(u => u.UserId == userId))
+        {
+            return NotFound(new { message = $"User {userId} not found." });
+        }
+
+        var orders = _db.Orders.Where(o => o.UserId == userId);
+        var totalCount = await orders.CountAsync();
+
+        // newest first, uses the (UserId, CreatedAt) index; OrderId makes the order stable
+        var pageQuery = orders
+            .OrderByDescending(o => o.CreatedAt)
+            .ThenByDescending(o => o.OrderId)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize);
+
+        // same CP2 rule as GetOrder: which amount column we may read depends on the phase
+        var rows = _db.Phase >= MigrationPhase.ReadNew
+            ? await pageQuery.Select(o => new OrderSummaryRow(
+                o.OrderId, o.PriceAmount, o.CurrencyCode, o.Status, o.CreatedAt,
+                o.Items.Count(), o.Items.Sum(i => i.Quantity))).ToListAsync()
+            : await pageQuery.Select(o => new OrderSummaryRow(
+                o.OrderId, o.TotalAmount, null, o.Status, o.CreatedAt,
+                o.Items.Count(), o.Items.Sum(i => i.Quantity))).ToListAsync();
+
+        var items = rows.Select(r => new OrderSummaryResponse(
+            r.OrderId, AmountOf(r.OrderId, r.Amount), r.CurrencyCode, r.Status.ToString(),
+            r.CreatedAt, r.ItemCount, r.TotalQuantity)).ToList();
+
+        var totalPages = (int)Math.Ceiling(totalCount / (double)pageSize);
+        return Ok(new PagedResult<OrderSummaryResponse>(items, page, pageSize, totalCount, totalPages));
     }
 
     // Best effort: if Mongo itself is down this can fail too (see README, known limitations).
@@ -187,23 +234,55 @@ public class OrdersController : ControllerBase
     // CP2 Phase 4 (switch read): from ReadNew on, the amount in the answer comes from PriceAmount
     // and the currency from CurrencyCode. TotalAmount is not looked at anymore, so it can be
     // dropped in phase 5. The JSON field is still called totalAmount, so clients don't notice.
+    // CP3: this is written as a projection, so EF only selects these columns. In Contract the
+    // TotalAmount property is not even mapped, so the query must not mention it.
+    private IQueryable<OrderRow> SelectOrderRows(IQueryable<Order> orders) =>
+        _db.Phase >= MigrationPhase.ReadNew
+            ? orders.Select(o => new OrderRow(
+                o.OrderId, o.UserId, o.PriceAmount, o.CurrencyCode, o.Status, o.CreatedAt,
+                o.Items.OrderBy(i => i.OrderItemId)
+                    .Select(i => new OrderItemResponse(i.ProductId, i.ProductName, i.UnitPrice, i.Quantity))
+                    .ToList()))
+            : orders.Select(o => new OrderRow(
+                o.OrderId, o.UserId, o.TotalAmount, null, o.Status, o.CreatedAt,
+                o.Items.OrderBy(i => i.OrderItemId)
+                    .Select(i => new OrderItemResponse(i.ProductId, i.ProductName, i.UnitPrice, i.Quantity))
+                    .ToList()));
+
+    // POST /orders already has the order in memory, so it builds the same row without a query
     private OrderResponse ToResponse(Order order)
     {
         var readNew = _db.Phase >= MigrationPhase.ReadNew;
-
-        // No fallback to TotalAmount here on purpose. MigrationGuard only lets the API into
-        // ReadNew after the backfill, so an empty PriceAmount would be a real bug.
-        var amount = readNew
-            ? order.PriceAmount ?? throw new InvalidOperationException($"Order {order.OrderId} has no PriceAmount.")
-            : order.TotalAmount ?? throw new InvalidOperationException($"Order {order.OrderId} has no TotalAmount.");
-
-        return new OrderResponse(
+        return ToResponse(new OrderRow(
             order.OrderId,
             order.UserId,
-            amount,
+            readNew ? order.PriceAmount : order.TotalAmount,
             readNew ? order.CurrencyCode : null,
-            order.Status.ToString(),
+            order.Status,
             order.CreatedAt,
-            order.Items.Select(i => new OrderItemResponse(i.ProductId, i.ProductName, i.UnitPrice, i.Quantity)).ToList());
+            order.Items.Select(i => new OrderItemResponse(i.ProductId, i.ProductName, i.UnitPrice, i.Quantity)).ToList()));
     }
+
+    private static OrderResponse ToResponse(OrderRow row) => new(
+        row.OrderId,
+        row.UserId,
+        AmountOf(row.OrderId, row.Amount),
+        row.CurrencyCode,
+        row.Status.ToString(),
+        row.CreatedAt,
+        row.Items);
+
+    // No fallback to the other amount column on purpose. MigrationGuard only lets the API into
+    // ReadNew after the backfill, so an empty amount would be a real bug.
+    private static decimal AmountOf(int orderId, decimal? amount) =>
+        amount ?? throw new InvalidOperationException($"Order {orderId} has no amount in the column this phase reads.");
+
+    // what the projections select; Amount is PriceAmount or TotalAmount depending on the phase
+    private record OrderRow(
+        int OrderId, int UserId, decimal? Amount, string? CurrencyCode, OrderStatus Status, DateTime CreatedAt,
+        List<OrderItemResponse> Items);
+
+    private record OrderSummaryRow(
+        int OrderId, decimal? Amount, string? CurrencyCode, OrderStatus Status, DateTime CreatedAt,
+        int ItemCount, int TotalQuantity);
 }

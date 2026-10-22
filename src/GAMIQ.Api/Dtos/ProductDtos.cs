@@ -24,4 +24,14 @@ public record ProductResponse(
     Dictionary<string, object> Attributes,
     DateTime CreatedAt);
 
+// CP3: one line of GET /products. Only what a catalog list shows, the description and the
+// attributes are left in Mongo (GET /products/{id} still returns everything).
+public record ProductSummaryResponse(
+    string Id,
+    string Name,
+    decimal Price,
+    int Stock,
+    List<string> Genres,
+    List<string> Platforms);
+
 public record PagedResult<T>(List<T> Items, int Page, int PageSize, long TotalCount, int TotalPages);

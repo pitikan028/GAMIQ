@@ -20,8 +20,10 @@ public class ProductsController : ControllerBase
     }
 
     // GET /api/v1/products?page=1&pageSize=20&genre=RPG
+    // CP3: projection. Mongo only sends back the fields of the list (no Description, no
+    // Attributes), so a page of 100 games is much smaller. Always 2 commands: count + find.
     [HttpGet]
-    public async Task<ActionResult<PagedResult<ProductResponse>>> GetProducts(
+    public async Task<ActionResult<PagedResult<ProductSummaryResponse>>> GetProducts(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
         [FromQuery] string? genre = null)
@@ -38,10 +40,11 @@ public class ProductsController : ControllerBase
             .SortByDescending(p => p.CreatedAt)
             .Skip((page - 1) * pageSize)
             .Limit(pageSize)
+            .Project(p => new ProductSummaryResponse(p.Id, p.Name, p.Price, p.Stock, p.Genres, p.Platforms))
             .ToListAsync();
 
         var totalPages = (int)Math.Ceiling(totalCount / (double)pageSize);
-        return Ok(new PagedResult<ProductResponse>(products.Select(ToResponse).ToList(), page, pageSize, totalCount, totalPages));
+        return Ok(new PagedResult<ProductSummaryResponse>(products, page, pageSize, totalCount, totalPages));
     }
 
     // GET /api/v1/products/{id}

@@ -169,3 +169,9 @@ Content-Type: application/json
 {
   "amount": 1.234
 }
+
+### CP3: order history of a user, newest first (3 SQL queries, see X-Sql-Queries) -> 200
+GET {{host}}/users/260/orders?page=1&pageSize=20
+
+### CP3: order history of an unknown user -> 404
+GET {{host}}/users/999999/orders

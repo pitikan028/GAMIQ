@@ -57,21 +57,37 @@ public class UsersController : ControllerBase
     }
 
     // GET /api/v1/users/{id}
+    // CP3: projection. One SQL query that joins the wallet and selects only the columns of the
+    // answer (plus the wallet version for the ETag). PasswordHash is never read from disk here,
+    // and no entity is built or tracked.
     [HttpGet("{id:int}")]
     public async Task<ActionResult<UserResponse>> GetUser(int id)
     {
         var user = await _db.Users
-            .AsNoTracking()
-            .Include(u => u.Account)
-            .FirstOrDefaultAsync(u => u.UserId == id);
+            .Where(u => u.UserId == id)
+            .Select(u => new
+            {
+                u.UserId,
+                u.Username,
+                u.Email,
+                u.CreatedAt,
+                Balance = (decimal?)u.Account!.Balance,
+                Currency = u.Account!.Currency,
+                Version = (uint?)u.Account!.Version
+            })
+            .FirstOrDefaultAsync();
 
         if (user is null)
         {
             return NotFound(new { message = $"User {id} not found." });
         }
 
-        SetWalletETag(user.Account);
-        return Ok(ToResponse(user));
+        if (user.Version is not null)
+        {
+            Response.Headers.ETag = $"\"{user.Version}\"";
+        }
+
+        return Ok(new UserResponse(user.UserId, user.Username, user.Email, user.CreatedAt, user.Balance ?? 0, user.Currency ?? "THB"));
     }
 
     // POST /api/v1/users/{id}/wallet/topup

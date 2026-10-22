@@ -25,9 +25,15 @@ if (string.IsNullOrWhiteSpace(postgresConnection))
 builder.Services.AddSingleton<MigrationState>();
 builder.Services.AddSingleton<MigrationGuard>();
 builder.Services.AddSingleton<BackfillJob>();
-builder.Services.AddDbContext<AppDbContext>(options => options
+// CP3: counts SQL / Mongo round trips per request (X-Sql-Queries, X-Mongo-Commands headers)
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<QueryCounter>();
+builder.Services.AddSingleton<SqlQueryCountInterceptor>();
+
+builder.Services.AddDbContext<AppDbContext>((services, options) => options
     .UseNpgsql(postgresConnection)
-    .ReplaceService<IModelCacheKeyFactory, PhaseModelCacheKeyFactory>());
+    .ReplaceService<IModelCacheKeyFactory, PhaseModelCacheKeyFactory>()
+    .AddInterceptors(services.GetRequiredService<SqlQueryCountInterceptor>()));
 
 builder.Services.Configure<MongoOptions>(builder.Configuration.GetSection("MongoDb"));
 builder.Services.AddSingleton<MongoContext>();
@@ -52,6 +58,22 @@ if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
+
+    // CP3: tell the client how many database round trips its request needed (tools/check_queries.py).
+    // Development only, a real API should not show this.
+    var queryCounter = app.Services.GetRequiredService<QueryCounter>();
+    app.Use(async (context, next) =>
+    {
+        queryCounter.StartRequest(context);
+        context.Response.OnStarting(() =>
+        {
+            var counts = queryCounter.ForRequest(context)!;
+            context.Response.Headers["X-Sql-Queries"] = counts.Sql.ToString();
+            context.Response.Headers["X-Mongo-Commands"] = counts.Mongo.ToString();
+            return Task.CompletedTask;
+        });
+        await next();
+    });
 }
 
 app.MapControllers();
