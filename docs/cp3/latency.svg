@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" width="760" height="300" role="img">
+<title>Latency p95 and p99</title>
+
+<style>
+  svg { --surface: #fcfcfb; --text-1: #0b0b0b; --text-2: #52514e; --grid: #e4e3df;
+        --s1: #2a78d6; --s2: #eb6834; --limit: #8a8984; }
+  @media (prefers-color-scheme: dark) {
+    svg { --surface: #1a1a19; --text-1: #f0efec; --text-2: #c3c2b7; --grid: #383835;
+          --s1: #3987e5; --s2: #d95926; --limit: #8f8e88; }
+  }
+  .bg { fill: var(--surface); }
+  .title { fill: var(--text-1); font: 600 15px system-ui, -apple-system, sans-serif; }
+  .sub { fill: var(--text-2); font: 12px system-ui, -apple-system, sans-serif; }
+  .tick { fill: var(--text-2); font: 11px system-ui, -apple-system, sans-serif; }
+  .label { fill: var(--text-1); font: 12px system-ui, -apple-system, sans-serif; }
+  .grid { stroke: var(--grid); stroke-width: 1; }
+  .axis { stroke: var(--text-2); stroke-width: 1; }
+  .limit { stroke: var(--limit); stroke-width: 1.5; stroke-dasharray: 6 4; }
+  .s1 { stroke: var(--s1); fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .s2 { stroke: var(--s2); fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .k1 { fill: var(--s1); } .k2 { fill: var(--s2); }
+</style>
+<rect class="bg" width="760" height="300" rx="8"/>
+<text class="title" x="64" y="22">Latency p95 and p99</text>
+<text class="sub" x="64" y="38">all endpoints together, every point is 5 s</text>
+<line class="grid" x1="64" x2="648" y1="256.0" y2="256.0"/>
+<text class="tick" x="56" y="260.0" text-anchor="end">0 ms</text>
+<line class="grid" x1="64" x2="648" y1="204.0" y2="204.0"/>
+<text class="tick" x="56" y="208.0" text-anchor="end">150 ms</text>
+<line class="grid" x1="64" x2="648" y1="152.0" y2="152.0"/>
+<text class="tick" x="56" y="156.0" text-anchor="end">300 ms</text>
+<line class="grid" x1="64" x2="648" y1="100.0" y2="100.0"/>
+<text class="tick" x="56" y="104.0" text-anchor="end">450 ms</text>
+<line class="grid" x1="64" x2="648" y1="48.0" y2="48.0"/>
+<text class="tick" x="56" y="52.0" text-anchor="end">600 ms</text>
+<text class="tick" x="64.0" y="274" text-anchor="middle">0:00</text>
+<text class="tick" x="161.3" y="274" text-anchor="middle">0:30</text>
+<text class="tick" x="258.7" y="274" text-anchor="middle">1:00</text>
+<text class="tick" x="356.0" y="274" text-anchor="middle">1:30</text>
+<text class="tick" x="453.3" y="274" text-anchor="middle">2:00</text>
+<text class="tick" x="550.7" y="274" text-anchor="middle">2:30</text>
+<text class="tick" x="648.0" y="274" text-anchor="middle">3:00</text>
+<text class="tick" x="648" y="290" text-anchor="end">time into the test (m:ss)</text>
+<line class="axis" x1="64" x2="648" y1="256" y2="256"/>
+<line class="limit" x1="64" x2="648" y1="186.7" y2="186.7"/>
+<text class="sub" x="656" y="190.7">p95 limit</text>
+<line class="limit" x1="64" x2="648" y1="82.7" y2="82.7"/>
+<text class="sub" x="656" y="86.7">p99 limit</text>
+<polyline class="s1" points="80.2,248.7 96.4,250.7 112.7,251.2 128.9,251.7 145.1,251.4 161.3,251.5 177.6,251.8 193.8,251.4 210.0,251.5 226.2,251.2 242.4,251.3 258.7,250.9 274.9,240.2 291.1,249.7 307.3,249.9 323.6,249.1 339.8,249.2 356.0,249.4 372.2,249.4 388.4,249.7 404.7,249.3 420.9,249.1 437.1,249.6 453.3,249.3 469.6,249.7 485.8,249.5 502.0,249.1 518.2,249.2 534.4,250.0 550.7,249.3 566.9,249.6 583.1,249.0 599.3,249.4 615.6,249.4 631.8,249.4 648.0,249.0"/>
+<polyline class="s2" points="80.2,244.1 96.4,250.0 112.7,249.9 128.9,250.6 145.1,250.2 161.3,250.4 177.6,250.5 193.8,250.3 210.0,250.1 226.2,250.3 242.4,250.2 258.7,249.8 274.9,194.4 291.1,248.3 307.3,247.3 323.6,247.3 339.8,247.4 356.0,248.1 372.2,248.0 388.4,248.3 404.7,248.4 420.9,248.4 437.1,248.2 453.3,248.4 469.6,248.0 485.8,248.1 502.0,247.7 518.2,248.0 534.4,248.1 550.7,248.2 566.9,247.3 583.1,248.0 599.3,247.3 615.6,248.2 631.8,248.1 648.0,247.8"/>
+<rect class="k1" x="656" y="244.0" width="10" height="10" rx="2"/>
+<text class="label" x="670" y="253.0">p95</text>
+<rect class="k2" x="656" y="229.0" width="10" height="10" rx="2"/>
+<text class="label" x="670" y="238.0">p99</text>
+<rect class="k2" x="605" y="12" width="10" height="10" rx="2"/>
+<text class="label" x="619" y="21">p99</text>
+<rect class="k1" x="562" y="12" width="10" height="10" rx="2"/>
+<text class="label" x="576" y="21">p95</text>
+</svg>

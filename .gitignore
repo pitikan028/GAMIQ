@@ -15,3 +15,6 @@ Thumbs.db
 ## Environment / secrets
 .env
 *.env.local
+
+## CP3 load test raw output (big, made again by every run)
+k6_raw.csv

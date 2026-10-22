@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" width="760" height="300" role="img">
+<title>Requests per second</title>
+
+<style>
+  svg { --surface: #fcfcfb; --text-1: #0b0b0b; --text-2: #52514e; --grid: #e4e3df;
+        --s1: #2a78d6; --s2: #eb6834; --limit: #8a8984; }
+  @media (prefers-color-scheme: dark) {
+    svg { --surface: #1a1a19; --text-1: #f0efec; --text-2: #c3c2b7; --grid: #383835;
+          --s1: #3987e5; --s2: #d95926; --limit: #8f8e88; }
+  }
+  .bg { fill: var(--surface); }
+  .title { fill: var(--text-1); font: 600 15px system-ui, -apple-system, sans-serif; }
+  .sub { fill: var(--text-2); font: 12px system-ui, -apple-system, sans-serif; }
+  .tick { fill: var(--text-2); font: 11px system-ui, -apple-system, sans-serif; }
+  .label { fill: var(--text-1); font: 12px system-ui, -apple-system, sans-serif; }
+  .grid { stroke: var(--grid); stroke-width: 1; }
+  .axis { stroke: var(--text-2); stroke-width: 1; }
+  .limit { stroke: var(--limit); stroke-width: 1.5; stroke-dasharray: 6 4; }
+  .s1 { stroke: var(--s1); fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .s2 { stroke: var(--s2); fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .k1 { fill: var(--s1); } .k2 { fill: var(--s2); }
+</style>
+<rect class="bg" width="760" height="300" rx="8"/>
+<text class="title" x="64" y="22">Requests per second</text>
+<text class="sub" x="64" y="38">50 virtual users, every point is 5 s</text>
+<line class="grid" x1="64" x2="648" y1="256.0" y2="256.0"/>
+<text class="tick" x="56" y="260.0" text-anchor="end">0</text>
+<line class="grid" x1="64" x2="648" y1="204.0" y2="204.0"/>
+<text class="tick" x="56" y="208.0" text-anchor="end">50</text>
+<line class="grid" x1="64" x2="648" y1="152.0" y2="152.0"/>
+<text class="tick" x="56" y="156.0" text-anchor="end">100</text>
+<line class="grid" x1="64" x2="648" y1="100.0" y2="100.0"/>
+<text class="tick" x="56" y="104.0" text-anchor="end">150</text>
+<line class="grid" x1="64" x2="648" y1="48.0" y2="48.0"/>
+<text class="tick" x="56" y="52.0" text-anchor="end">200</text>
+<text class="tick" x="64.0" y="274" text-anchor="middle">0:00</text>
+<text class="tick" x="161.3" y="274" text-anchor="middle">0:30</text>
+<text class="tick" x="258.7" y="274" text-anchor="middle">1:00</text>
+<text class="tick" x="356.0" y="274" text-anchor="middle">1:30</text>
+<text class="tick" x="453.3" y="274" text-anchor="middle">2:00</text>
+<text class="tick" x="550.7" y="274" text-anchor="middle">2:30</text>
+<text class="tick" x="648.0" y="274" text-anchor="middle">3:00</text>
+<text class="tick" x="648" y="290" text-anchor="end">time into the test (m:ss)</text>
+<line class="axis" x1="64" x2="648" y1="256" y2="256"/>
+<polyline class="s1" points="80.2,152.0 96.4,152.4 112.7,153.2 128.9,154.3 145.1,155.3 161.3,150.8 177.6,152.0 193.8,153.2 210.0,153.5 226.2,152.6 242.4,153.2 258.7,151.8 274.9,155.5 291.1,154.3 307.3,151.6 323.6,152.4 339.8,154.5 356.0,153.7 372.2,154.3 388.4,153.5 404.7,155.5 420.9,152.8 437.1,154.5 453.3,154.5 469.6,153.9 485.8,154.9 502.0,154.9 518.2,153.5 534.4,154.7 550.7,153.9 566.9,152.4 583.1,152.0 599.3,154.1 615.6,154.1 631.8,153.0 648.0,156.0"/>
+</svg>
